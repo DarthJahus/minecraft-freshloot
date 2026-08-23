@@ -4,8 +4,10 @@ import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.state.property.Properties;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
 
 import java.util.Objects;
@@ -17,6 +19,14 @@ import net.jahus.freshloot.LootRegistry.DimPos;
  * Shared logic invoked by FreshLootMod's UseBlockCallback (open/loot) and
  * by ChestBlockEntityMixin/BarrelBlockEntityMixin's onClose injection
  * (close/replace).
+ *
+ * A position is "managed" purely based on whether it currently carries a
+ * non-null LootTable NBT tag -- there is no separate registry of managed
+ * positions to fall out of sync with the world after a restart. Every
+ * replacement container gets that same NBT tag stamped back onto it at
+ * rotation time (see breakAndReplace), so a rotated container is
+ * indistinguishable from a freshly-generated vanilla one on the next
+ * server start: it just works the same way it did the first time.
  *
  * Lifecycle for a managed position:
  *   - tryOpen/applyLoot: called from UseBlockCallback, before vanilla opens
@@ -32,24 +42,41 @@ import net.jahus.freshloot.LootRegistry.DimPos;
  *     bookkeeping, not whether a ScreenHandler gets created, so cancelling
  *     onOpen alone left a denied player looking at an empty open GUI with
  *     no tracked viewer for onClose to later match and clean up.
+ *
+ *     applyLoot captures the container's loot table + facing into
+ *     LootRegistry's short-lived PENDING_ROLL map *before* calling
+ *     generateLoot() -- vanilla clears the LootTable NBT tag the instant
+ *     loot is actually generated, so this is the last point at which that
+ *     information is readable off the block itself. onClose picks it back
+ *     up a tick later to stamp it onto the replacement.
  *   - onClose: marks the closing player as having looted this position
  *     (persisted -- survives restarts), then breaks the block outright
  *     (world.breakBlock, item drops handled by vanilla) and places a fresh
- *     container with the same loot table + facing for the next player. The
- *     break+replace is deferred a tick (server.execute) to avoid re-entering
- *     this same block entity's onOpen/onClose from inside its own onClose.
- *   - onPlayerBreak (block-break event): if the breaker already looted this
- *     position, the freshly-placed replacement container's loot table is
- *     cleared right before vanilla processes the break, so it drops as an
- *     empty chest/barrel instead of rolling a second loot for them. This
- *     covers the case where the same player who just closed the container
- *     immediately breaks the replacement themselves -- without this, that
- *     replacement would still carry a live, never-rolled loot table and
- *     vanilla would generate loot for it on break, letting that player loot
- *     the same position twice (once via the GUI, once via breaking the
- *     freshly-spawned duplicate). Accepted as a known v1.0.0 tradeoff: the
+ *     container with the same loot table + facing for the next player,
+ *     written straight into its LootTable NBT tag (not just kept in
+ *     memory) so the position survives a restart on its own. The
+ *     break+replace is deferred a tick (server.execute) to avoid
+ *     re-entering this same block entity's onOpen/onClose from inside its
+ *     own onClose.
+ *   - onPlayerBreak (block-break event): any container that still carries
+ *     a live LootTable NBT tag right now has that table cleared right
+ *     before vanilla processes the break, so it drops as an empty
+ *     chest/barrel instead of rolling loot for the breaker. This single
+ *     rule covers every case that matters:
+ *       - the breaker already looted this exact position and immediately
+ *         breaks the freshly-spawned replacement themselves (that
+ *         replacement carries a live, never-rolled table -- without this
+ *         it would let that player loot the same position twice, once via
+ *         the GUI and once via breaking the duplicate);
+ *       - a container nobody has ever opened, broken outright instead of
+ *         looted through the GUI (grief case);
+ *       - a container the in-memory registry lost track of after a server
+ *         restart, whose LootTable NBT nonetheless survived on the block
+ *         itself.
+ *     Accepted as a known v1.0.0 tradeoff for the first case: the
  *     duplicate container itself still gets created and only its loot is
- *     neutralized, rather than preventing the duplicate from spawning at all.
+ *     neutralized, rather than preventing the duplicate from spawning at
+ *     all.
  */
 public final class LootContainerHandler {
 
@@ -69,10 +96,39 @@ public final class LootContainerHandler {
         if (world.isClient()) {
             return true;
         }
+        if (player.isSpectator()) {
+            // Spectators can already see into a container someone else has
+            // open (vanilla behavior) without going through our tracking at
+            // all -- letting them through tryOpen would incorrectly consume
+            // "open" state (or worse, get treated as looting/closing the
+            // container once their screen closes). Never register them as
+            // a viewer and never generate loot for them.
+            return true;
+        }
         DimPos pos = DimPos.of(world, container.getPos());
 
-        if (!LootRegistry.isRegistered(pos)) {
-            // Not a loot container we manage -- let vanilla behave normally.
+        // Check "is someone already looting this position?" BEFORE the
+        // getLootTable()==null shortcut below. generateLoot() (called from
+        // applyLoot) clears the block's LootTable NBT the instant the
+        // first viewer's loot is rolled -- well before the deferred
+        // break+replace (next tick) re-stamps a fresh table onto the
+        // replacement. During that window the NBT-based "is this managed"
+        // check alone can't tell a mid-session container apart from an
+        // unmanaged one, so a second player clicking the same still-open
+        // container in that window must still be caught here, not fall
+        // through to vanilla's normal open behavior.
+        if (LootRegistry.isOpen(pos)) {
+            UUID viewer = LootRegistry.getViewer(pos);
+            if (player instanceof ServerPlayerEntity spe && !spe.getUuid().equals(viewer)) {
+                spe.sendMessage(Text.literal("Someone else is already looting this."), true);
+            }
+            return false;
+        }
+
+        if (container.getLootTable() == null) {
+            // No loot table on this block right now -- either not a
+            // container FreshLoot manages, or already mid-generation from
+            // another path. Let vanilla behave normally.
             return true;
         }
 
@@ -80,14 +136,6 @@ public final class LootContainerHandler {
 
         if (player instanceof ServerPlayerEntity spe && LootRegistry.hasLooted(server, spe.getUuid(), pos)) {
             spe.sendMessage(Text.literal("You have already looted this chest."), true);
-            return false;
-        }
-
-        if (LootRegistry.isOpen(pos)) {
-            UUID viewer = LootRegistry.getViewer(pos);
-            if (player instanceof ServerPlayerEntity spe && !spe.getUuid().equals(viewer)) {
-                spe.sendMessage(Text.literal("Someone else is already looting this."), true);
-            }
             return false;
         }
 
@@ -110,15 +158,26 @@ public final class LootContainerHandler {
         if (world.isClient()) {
             return;
         }
-        DimPos pos = DimPos.of(world, container.getPos());
-        LootRegistry.LootRecord record = LootRegistry.get(pos);
-        if (record == null) {
+        if (player.isSpectator()) {
+            // Never roll loot for a spectator peeking in -- that would
+            // consume the container's fresh-seed roll (or prematurely
+            // populate it) for someone who isn't actually looting it.
+            return;
+        }
+        var lootTable = container.getLootTable();
+        if (lootTable == null) {
             return;
         }
 
-        if (container.getLootTable() == null) {
-            container.setLootTable(record.lootTable(), world.getRandom().nextLong());
-        }
+        DimPos pos = DimPos.of(world, container.getPos());
+
+        // Capture table + facing now, before generateLoot() below clears
+        // the LootTable NBT tag -- this is the last point it's readable
+        // off the block. onClose picks it back up a tick later to stamp
+        // it onto the replacement container.
+        Direction facing = readFacing(world, pos.pos());
+        LootRegistry.capturePendingRoll(pos, lootTable, facing);
+
         container.generateLoot(player);
     }
 
@@ -132,11 +191,15 @@ public final class LootContainerHandler {
         if (world.isClient()) {
             return;
         }
-        DimPos dimPos = DimPos.of(world, container.getPos());
-
-        if (!LootRegistry.isRegistered(dimPos)) {
+        if (player.isSpectator()) {
+            // A spectator was never registered as the viewer (see tryOpen),
+            // so this would already fall through the viewer check below --
+            // but guard explicitly: a spectator closing their peek-in must
+            // never be treated as having looted this position or trigger
+            // the break+replace rotation.
             return;
         }
+        DimPos dimPos = DimPos.of(world, container.getPos());
 
         UUID viewer = LootRegistry.getViewer(dimPos);
         if (viewer == null || !viewer.equals(player.getUuid())) {
@@ -144,12 +207,11 @@ public final class LootContainerHandler {
             return;
         }
 
-        LootRegistry.LootRecord record = LootRegistry.get(dimPos);
-
         // This player has now used their one roll on this position, forever.
         LootRegistry.markLooted(server, player.getUuid(), dimPos);
         LootRegistry.markClosed(dimPos);
 
+        LootRegistry.LootRecord record = LootRegistry.takePendingRoll(dimPos);
         if (record == null) {
             return;
         }
@@ -162,6 +224,13 @@ public final class LootContainerHandler {
         // this call has even returned. Scheduling it via server.execute
         // runs it as a fresh top-level tick task instead, off this call stack.
         server.execute(() -> breakAndReplace(dimPos, record, server));
+    }
+
+    private static Direction readFacing(World world, BlockPos pos) {
+        var state = world.getBlockState(pos);
+        return state.contains(Properties.HORIZONTAL_FACING)
+                ? state.get(Properties.HORIZONTAL_FACING)
+                : Direction.NORTH;
     }
 
     private static void breakAndReplace(DimPos dimPos, LootRegistry.LootRecord record, MinecraftServer server) {
@@ -190,9 +259,8 @@ public final class LootContainerHandler {
         world.breakBlock(pos, true, null, 512);
 
         // Place a fresh container of the same type/facing so it looks
-        // untouched, then re-register it with the preserved loot table for
-        // whoever opens it next. ChestBlock and BarrelBlock each declare
-        // their own FACING property.
+        // untouched. ChestBlock and BarrelBlock each declare their own
+        // FACING property.
         net.minecraft.block.BlockState newState;
         if (block instanceof net.minecraft.block.ChestBlock) {
             newState = block.getDefaultState().with(net.minecraft.block.ChestBlock.FACING, record.facing());
@@ -202,7 +270,25 @@ public final class LootContainerHandler {
             newState = block.getDefaultState();
         }
         world.setBlockState(pos, newState);
-        LootRegistry.register(dimPos, record.lootTable(), record.facing());
+
+        // Stamp the preserved loot table directly onto the new block's
+        // NBT -- not just an in-memory record -- so this position is a
+        // self-describing, ordinary-looking loot container again. If the
+        // server restarts before anyone opens it, FreshLootMod's
+        // UseBlockCallback will recognize it exactly like a fresh vanilla
+        // container, with no dependency on anything surviving in memory.
+        //
+        // Seed is 0L here deliberately -- an unrolled seed, same as a
+        // fresh vanilla loot container that has never been opened. The
+        // real seed is only generated in applyLoot, right before
+        // generateLoot() actually rolls the loot for whoever opens this
+        // container next (world.getRandom().nextLong() there). Stamping a
+        // real seed here, at placement time, would fix this container's
+        // roll the moment it's placed -- before anyone has opened it --
+        // instead of leaving it fresh until the actual roll happens.
+        if (world.getBlockEntity(pos) instanceof LootableContainerBlockEntity newContainer) {
+            newContainer.setLootTable(record.lootTable(), 0L);
+        }
     }
 
     /**
@@ -227,20 +313,17 @@ public final class LootContainerHandler {
     }
 
     /**
-     * Call from a block-break event (BEFORE), for any managed container
-     * that's about to be broken. If the breaking player already looted this
-     * position, clears the container's loot table right now so vanilla's
-     * break-time loot generation (if any) has nothing to roll -- the block
-     * still breaks and drops as an empty container, rather than granting a
-     * second loot roll to a player who already had their turn.
+     * Call from a block-break event (BEFORE), for any loot container about
+     * to be broken. Any container that currently carries a live LootTable
+     * NBT tag -- regardless of why (never opened by anyone, or a
+     * freshly-rotated replacement the breaker already looted once under a
+     * previous instance, or a container the in-memory registry lost track
+     * of after a server restart) -- has that table cleared right now, so
+     * vanilla's break-time loot generation (if any) has nothing to roll
+     * and the block drops empty.
      */
-    public static void neutralizeIfAlreadyLooted(LootableContainerBlockEntity container, ServerPlayerEntity player, MinecraftServer server) {
-        World world = player.getWorld();
-        DimPos pos = DimPos.of(world, container.getPos());
-        if (!LootRegistry.isRegistered(pos)) {
-            return;
-        }
-        if (LootRegistry.hasLooted(server, player.getUuid(), pos)) {
+    public static void neutralizeLootOnBreak(LootableContainerBlockEntity container) {
+        if (container.getLootTable() != null) {
             container.setLootTable(null, 0L);
         }
     }

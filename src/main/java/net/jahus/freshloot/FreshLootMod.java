@@ -12,12 +12,13 @@ import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.state.property.Properties;
 import net.minecraft.text.Text;
 import net.minecraft.util.ActionResult;
-import net.minecraft.util.math.Direction;
+import net.minecraft.util.Formatting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.UUID;
 
 import net.jahus.freshloot.LootRegistry.DimPos;
 
@@ -28,20 +29,22 @@ public class FreshLootMod implements ModInitializer {
     @Override
     public void onInitialize() {
         // Single entry point for right-click interaction with a managed
-        // container. This used to only register the loot table, leaving the
-        // actual open/deny decision to ChestBlockEntityMixin/
-        // BarrelBlockEntityMixin's onOpen injection -- but cancelling
-        // onOpen only skips our loot logic, it does NOT stop vanilla from
-        // opening the ScreenHandler (createScreenHandlerFactory/createMenu
-        // don't consult onOpen at all). That let a denied player still see
-        // an (empty) open GUI, and left the container's open/viewer-count
-        // state stuck since onClose later found no tracked viewer to match.
+        // container. Deciding open/deny here, before vanilla's own
+        // interaction handling runs, matters: cancelling the block
+        // entity's onOpen instead (an earlier approach) only skips our
+        // loot logic, it does NOT stop vanilla from opening the
+        // ScreenHandler (createScreenHandlerFactory/createMenu don't
+        // consult onOpen at all). That let a denied player still see an
+        // (empty) open GUI, and left the container's open/viewer-count
+        // state stuck since onClose later found no tracked viewer to
+        // match. Returning ActionResult.FAIL here instead genuinely blocks
+        // the interaction -- no ScreenHandler ever opens for a denied
+        // player.
         //
-        // Doing the tryOpen/applyLoot check here instead, before vanilla's
-        // own handling runs, lets us return ActionResult.FAIL to genuinely
-        // block the interaction -- no ScreenHandler ever opens for a denied
-        // player, so there's nothing left open and nothing for onClose to
-        // clean up.
+        // A container is "managed" purely based on carrying a non-null
+        // LootTable NBT tag right now -- see LootContainerHandler's class
+        // javadoc for why there's no separate registry of managed
+        // positions to fall out of sync with the world after a restart.
         UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
             if (world.isClient()) {
                 return ActionResult.PASS;
@@ -62,25 +65,6 @@ public class FreshLootMod implements ModInitializer {
                 return ActionResult.PASS;
             }
 
-            DimPos dimPos = DimPos.of(world, blockPos);
-
-            // Register this container's loot table the first time anyone
-            // interacts with it, while it still has vanilla's original
-            // table/seed intact (i.e. before vanilla's own one-shot
-            // mechanic consumes it).
-            if (!LootRegistry.isRegistered(dimPos) && container.getLootTable() != null) {
-                Direction facing = state.contains(Properties.HORIZONTAL_FACING)
-                        ? state.get(Properties.HORIZONTAL_FACING)
-                        : Direction.NORTH;
-                LootRegistry.register(dimPos, container.getLootTable(), facing);
-            }
-
-            if (!LootRegistry.isRegistered(dimPos)) {
-                // Not (or no longer) a container we manage -- let vanilla
-                // behave normally.
-                return ActionResult.PASS;
-            }
-
             if (!LootContainerHandler.tryOpen(container, player)) {
                 // Genuinely block the interaction: vanilla never opens a
                 // ScreenHandler for this click, so there's no stray open
@@ -96,51 +80,68 @@ public class FreshLootMod implements ModInitializer {
             if (world.isClient()) {
                 return true;
             }
-            DimPos dimPos = DimPos.of(world, pos);
-            if (!(blockEntity instanceof LootableContainerBlockEntity container) || !LootRegistry.isRegistered(dimPos)) {
+            if (!(blockEntity instanceof LootableContainerBlockEntity container)) {
                 return true;
             }
             if (!(player instanceof ServerPlayerEntity spe)) {
                 return true;
             }
+            if (player.isSpectator()) {
+                return true;
+            }
 
+            DimPos dimPos = DimPos.of(world, pos);
             MinecraftServer server = spe.getServer();
 
-            // Broadcast + log a grief warning if this player is breaking a
-            // managed container that they have not looted themselves yet --
-            // i.e. destroying it before getting (or before anyone else who
-            // hasn't looted it yet gets) a chance to open it normally. This
-            // covers both a container nobody has ever opened (loot table
-            // never generated) and a freshly-rotated one after someone
-            // else's roll, since both cases mean this player is destroying
-            // a loot opportunity rather than claiming it through the GUI.
-            if (!LootRegistry.hasLooted(server, spe.getUuid(), dimPos)) {
-                LootRegistry.LootRecord record = LootRegistry.get(dimPos);
-                String lootTableId = record != null ? record.lootTable().getValue().toString() : "unknown";
-                String warning = String.format(
-                        "[FreshLoot] %s broke a loot container without looting it first at %s [%d, %d, %d] (loot table: %s)",
+            // "This player is destroying a loot opportunity instead of
+            // claiming it through the GUI" -- true whenever this exact
+            // container instance still carries a live, never-rolled loot
+            // table right now, regardless of whether this same player
+            // already looted an earlier container at this position in a
+            // previous rotation. hasLooted() is keyed by position, not by
+            // block instance, so gating on it here would wrongly silence
+            // the warning for a player who breaks a freshly-rotated,
+            // still-unlooted replacement at a position they'd looted
+            // before -- exactly the "no message" case reported. Read
+            // getLootTable() -- and log/broadcast -- before
+            // neutralizeLootOnBreak below can clear the table.
+            boolean neverLooted = container.getLootTable() != null;
+
+            if (neverLooted) {
+                Text publicWarning = Text.literal(spe.getName().getString() + " broke a loot container before looting it!")
+                        .formatted(Formatting.RED);
+                server.getPlayerManager().broadcast(publicWarning, false);
+
+                String lootTableId = container.getLootTable() != null
+                        ? container.getLootTable().getValue().toString()
+                        : "unknown";
+                LOGGER.warn(
+                        "[FreshLoot] {} broke an unlooted loot container at {} [{}, {}, {}] (loot table: {})",
                         spe.getName().getString(),
                         dimPos.dimension().getValue(),
                         pos.getX(), pos.getY(), pos.getZ(),
                         lootTableId
                 );
-                server.getPlayerManager().broadcast(Text.literal(warning), false);
-                LOGGER.warn(warning);
             }
 
-            // If someone else currently has this open, force their screen
-            // closed first so state cleans up through the normal onClose
-            // path rather than leaving a stale "open" record.
-            if (LootRegistry.isOpen(dimPos)) {
+            // If this container is actively being looted by someone else
+            // right now, force their screen closed so state cleans up
+            // through the normal onClose path rather than leaving a stale
+            // "open" record. A player breaking their own currently-open
+            // container (e.g. mining through it) doesn't need this.
+            UUID viewerUuid = LootRegistry.getViewer(dimPos);
+            if (viewerUuid != null && !viewerUuid.equals(spe.getUuid())) {
                 LootContainerHandler.forceCloseViewer(dimPos, server);
             }
 
-            // If the breaker already looted this exact position (e.g. this
-            // is the freshly-spawned replacement container right after they
-            // closed their own GUI on it), strip its loot table before
-            // vanilla processes the break, so it drops empty instead of
-            // granting a second roll.
-            LootContainerHandler.neutralizeIfAlreadyLooted(container, spe, server);
+            // Strip the loot table right before vanilla processes the
+            // break: any container that still carries a live LootTable
+            // NBT tag right now gets it cleared (see
+            // neutralizeLootOnBreak), so the block drops empty instead of
+            // granting loot to someone destroying it outside the normal
+            // open/close cycle. Same predicate as the warning above, so
+            // "message sent" and "loot denied" always agree.
+            LootContainerHandler.neutralizeLootOnBreak(container);
 
             return true;
         });

@@ -10,8 +10,10 @@ import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.ChestBlockEntity;
 import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.block.enums.ChestType;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.state.property.Properties;
+import net.minecraft.text.Text;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.math.Direction;
 import org.slf4j.Logger;
@@ -102,11 +104,35 @@ public class FreshLootMod implements ModInitializer {
                 return true;
             }
 
+            MinecraftServer server = spe.getServer();
+
+            // Broadcast + log a grief warning if this player is breaking a
+            // managed container that they have not looted themselves yet --
+            // i.e. destroying it before getting (or before anyone else who
+            // hasn't looted it yet gets) a chance to open it normally. This
+            // covers both a container nobody has ever opened (loot table
+            // never generated) and a freshly-rotated one after someone
+            // else's roll, since both cases mean this player is destroying
+            // a loot opportunity rather than claiming it through the GUI.
+            if (!LootRegistry.hasLooted(server, spe.getUuid(), dimPos)) {
+                LootRegistry.LootRecord record = LootRegistry.get(dimPos);
+                String lootTableId = record != null ? record.lootTable().getValue().toString() : "unknown";
+                String warning = String.format(
+                        "[FreshLoot] %s broke a loot container without looting it first at %s [%d, %d, %d] (loot table: %s)",
+                        spe.getName().getString(),
+                        dimPos.dimension().getValue(),
+                        pos.getX(), pos.getY(), pos.getZ(),
+                        lootTableId
+                );
+                server.getPlayerManager().broadcast(Text.literal(warning), false);
+                LOGGER.warn(warning);
+            }
+
             // If someone else currently has this open, force their screen
             // closed first so state cleans up through the normal onClose
             // path rather than leaving a stale "open" record.
             if (LootRegistry.isOpen(dimPos)) {
-                LootContainerHandler.forceCloseViewer(dimPos, spe.getServer());
+                LootContainerHandler.forceCloseViewer(dimPos, server);
             }
 
             // If the breaker already looted this exact position (e.g. this
@@ -114,7 +140,7 @@ public class FreshLootMod implements ModInitializer {
             // closed their own GUI on it), strip its loot table before
             // vanilla processes the break, so it drops empty instead of
             // granting a second roll.
-            LootContainerHandler.neutralizeIfAlreadyLooted(container, spe, spe.getServer());
+            LootContainerHandler.neutralizeIfAlreadyLooted(container, spe, server);
 
             return true;
         });

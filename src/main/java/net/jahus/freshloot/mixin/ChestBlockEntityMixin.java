@@ -16,17 +16,6 @@ import java.util.Objects;
 
 @Mixin(ChestBlockEntity.class)
 public abstract class ChestBlockEntityMixin {
-
-    // Note: onOpen used to be intercepted here too (to block a denied
-    // player's open), but cancelling it only skips vanilla's viewer-count/
-    // animation bookkeeping -- it does NOT stop the ScreenHandler itself
-    // from opening (that's driven by createScreenHandlerFactory/createMenu,
-    // which never consult onOpen). The actual open/deny decision now
-    // happens upstream in FreshLootMod's UseBlockCallback, before vanilla's
-    // interaction handling runs at all, so a denied interaction genuinely
-    // never opens a GUI. Only onClose (reacting to a close that already
-    // happened) remains here.
-
     @Inject(method = "onClose", at = @At("HEAD"))
     private void freshloot$onClose(PlayerEntity player, CallbackInfo ci) {
         ChestBlockEntity chest = (ChestBlockEntity) (Object) this;

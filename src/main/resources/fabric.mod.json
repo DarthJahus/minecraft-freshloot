@@ -1,0 +1,28 @@
+{
+	"schemaVersion": 1,
+	"id": "freshloot",
+	"version": "${version}",
+	"name": "FreshLoot",
+	"description": "One independent loot roll per player, per chest or barrel.",
+	"authors": [
+		"DarthJahus"
+	],
+	"contact": {},
+	"license": "CC0-1.0",
+	"icon": "assets/freshloot/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"net.jahus.freshloot.FreshLootMod"
+		]
+	},
+	"mixins": [
+		"freshloot.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.16.9",
+		"minecraft": "~1.21.4",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}

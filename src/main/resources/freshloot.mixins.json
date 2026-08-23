@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "package": "net.jahus.freshloot.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "BarrelBlockEntityMixin",
+    "ChestBlockEntityMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+	}
+}

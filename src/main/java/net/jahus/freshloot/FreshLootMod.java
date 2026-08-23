@@ -93,22 +93,32 @@ public class FreshLootMod implements ModInitializer {
             DimPos dimPos = DimPos.of(world, pos);
             MinecraftServer server = spe.getServer();
 
-            // "This player is destroying a loot opportunity instead of
-            // claiming it through the GUI" -- true whenever this exact
-            // container instance still carries a live, never-rolled loot
-            // table right now, regardless of whether this same player
-            // already looted an earlier container at this position in a
-            // previous rotation. hasLooted() is keyed by position, not by
-            // block instance, so gating on it here would wrongly silence
-            // the warning for a player who breaks a freshly-rotated,
-            // still-unlooted replacement at a position they'd looted
-            // before -- exactly the "no message" case reported. Read
-            // getLootTable() -- and log/broadcast -- before
-            // neutralizeLootOnBreak below can clear the table.
+            // Grief warning fires whenever the breaker is destroying a
+            // loot opportunity instead of letting it run its normal
+            // course, in either of two independent ways:
+            //   - the container instance still carries a live,
+            //     never-rolled LootTable NBT tag right now (never opened
+            //     by anyone; a freshly-rotated replacement the breaker
+            //     already looted once under a previous instance; or one
+            //     the in-memory registry lost track of after a restart);
+            //   - this exact position is currently open by ANYONE,
+            //     including the breaker themselves. Destroying a container
+            //     that's mid-open wipes out a loot opportunity that could
+            //     otherwise exist for other players (the position's whole
+            //     rotation cycle never completes), which is griefing
+            //     regardless of whose GUI happens to be open when it
+            //     happens -- applyLoot already cleared the NBT the moment
+            //     that GUI opened, so the NBT alone can't signal this.
+            // Read both before neutralizeLootOnBreak below can clear the
+            // table, and before forceCloseViewer below can clear the
+            // open/viewer record.
             boolean neverLooted = container.getLootTable() != null;
+            UUID viewerUuid = LootRegistry.getViewer(dimPos);
+            boolean isCurrentlyOpen = viewerUuid != null;
+            boolean openByOther = isCurrentlyOpen && !viewerUuid.equals(spe.getUuid());
 
-            if (neverLooted) {
-                Text publicWarning = Text.literal(spe.getName().getString() + " broke a loot container before looting it!")
+            if (neverLooted || isCurrentlyOpen) {
+                Text publicWarning = Text.literal(spe.getName().getString() + " broke a loot container!")
                         .formatted(Formatting.RED);
                 server.getPlayerManager().broadcast(publicWarning, false);
 
@@ -129,8 +139,7 @@ public class FreshLootMod implements ModInitializer {
             // through the normal onClose path rather than leaving a stale
             // "open" record. A player breaking their own currently-open
             // container (e.g. mining through it) doesn't need this.
-            UUID viewerUuid = LootRegistry.getViewer(dimPos);
-            if (viewerUuid != null && !viewerUuid.equals(spe.getUuid())) {
+            if (openByOther) {
                 LootContainerHandler.forceCloseViewer(dimPos, server);
             }
 
@@ -139,8 +148,11 @@ public class FreshLootMod implements ModInitializer {
             // NBT tag right now gets it cleared (see
             // neutralizeLootOnBreak), so the block drops empty instead of
             // granting loot to someone destroying it outside the normal
-            // open/close cycle. Same predicate as the warning above, so
-            // "message sent" and "loot denied" always agree.
+            // open/close cycle. Note this is narrower than the warning
+            // above on purpose: the isCurrentlyOpen-but-NBT-already-null
+            // case has nothing left to clear (that viewer's loot was
+            // already rolled the moment their GUI opened), so
+            // neutralizeLootOnBreak is naturally a no-op there.
             LootContainerHandler.neutralizeLootOnBreak(container);
 
             return true;

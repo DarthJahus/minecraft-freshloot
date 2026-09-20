@@ -8,7 +8,7 @@
 		"DarthJahus"
 	],
 	"contact": {},
-	"license": "CC0-1.0",
+	"license": "Apache-2.0",
 	"icon": "assets/freshloot/icon.png",
 	"environment": "*",
 	"entrypoints": {

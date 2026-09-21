@@ -32,6 +32,16 @@ public class FreshLootMod implements ModInitializer {
             if (world.isClient()) {
                 return ActionResult.PASS;
             }
+            // Vanilla only opens a container when the player is NOT sneaking with
+            // something in hand. Sneak + item means "place / use the item against
+            // this block": the container must not be opened, so the loot table
+            // must not be consumed here (the placement guards need it intact).
+            // Sneaking with empty hands still opens the container normally.
+            if (player.isSneaking()
+                    && (!player.getMainHandStack().isEmpty() || !player.getOffHandStack().isEmpty())) {
+                return ActionResult.PASS;
+            }
+
             var blockPos = hitResult.getBlockPos();
             BlockEntity be = world.getBlockEntity(blockPos);
             if (!(be instanceof LootableContainerBlockEntity container)

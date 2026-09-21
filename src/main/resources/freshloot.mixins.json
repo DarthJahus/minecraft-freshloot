@@ -5,7 +5,9 @@
   "mixins": [
     "BarrelBlockEntityMixin",
     "ChestBlockEntityMixin",
-    "FreshLootChestPlacementGuardMixin"
+    "FreshLootChestPlacementGuardMixin",
+    "HopperPlacementGuardMixin",
+    "LootableContainerExtractionGuardMixin"
   ],
   "injectors": {
     "defaultRequire": 1

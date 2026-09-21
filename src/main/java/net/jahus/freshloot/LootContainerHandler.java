@@ -1,17 +1,23 @@
 package net.jahus.freshloot;
 
+import net.minecraft.block.entity.BarrelBlockEntity;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.ChestBlockEntity;
 import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.state.property.Properties;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
 
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import net.jahus.freshloot.LootRegistry.DimPos;
 
@@ -19,6 +25,58 @@ import net.jahus.freshloot.LootRegistry.DimPos;
 public final class LootContainerHandler {
 
     private LootContainerHandler() {}
+
+    /**
+     * Containers already reported as griefed by external extraction. A hopper
+     * minecart calls removeStack many times per tick, so we must alert once.
+     * Cleared when breakAndReplace re-arms the container with its loot table.
+     */
+    private static final Set<DimPos> SPOILED_REPORTED = ConcurrentHashMap.newKeySet();
+
+    /**
+     * True iff be is a chest or barrel that still carries a loot table, i.e.
+     * nobody has claimed it since it was last armed. Null-safe.
+     */
+    public static boolean isUnclaimedLootContainer(BlockEntity be) {
+        if (!(be instanceof ChestBlockEntity || be instanceof BarrelBlockEntity)) {
+            return false;
+        }
+        return be instanceof LootableContainerBlockEntity lootable && lootable.getLootTable() != null;
+    }
+
+    /**
+     * An unclaimed loot container was drained by something outside our
+     * open/close flow (hopper, hopper minecart, dropper...). Same treatment as
+     * a player breaking it: public warning, log, neutralize.
+     */
+    public static void reportSpoiledByExtraction(LootableContainerBlockEntity container, World world, BlockPos pos) {
+        if (world.isClient() || !(world instanceof net.minecraft.server.world.ServerWorld serverWorld)) {
+            return;
+        }
+        DimPos key = DimPos.of(world, pos);
+        if (!SPOILED_REPORTED.add(key)) {
+            return;
+        }
+
+        String lootTableId = container.getLootTable() != null
+                ? container.getLootTable().getValue().toString()
+                : "unknown";
+
+        MinecraftServer server = serverWorld.getServer();
+        server.getPlayerManager().broadcast(
+                Text.literal("A loot container was emptied by an external source at "
+                        + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "!")
+                        .formatted(Formatting.RED),
+                false);
+
+        FreshLootMod.LOGGER.warn(
+                "[FreshLoot] Unclaimed loot container drained by an external source at {} [{}, {}, {}] (loot table: {})",
+                world.getRegistryKey().getValue(),
+                pos.getX(), pos.getY(), pos.getZ(),
+                lootTableId);
+
+        neutralizeLootOnBreak(container);
+    }
 
     public static boolean tryOpen(LootableContainerBlockEntity container, PlayerEntity player) {
         World world = player.getWorld();
@@ -133,6 +191,7 @@ public final class LootContainerHandler {
 
         if (world.getBlockEntity(pos) instanceof LootableContainerBlockEntity newContainer) {
             newContainer.setLootTable(record.lootTable(), 0L);
+            SPOILED_REPORTED.remove(dimPos);
         }
     }
 

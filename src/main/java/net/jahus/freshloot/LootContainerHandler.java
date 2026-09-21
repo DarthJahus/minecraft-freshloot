@@ -64,13 +64,13 @@ public final class LootContainerHandler {
 
         MinecraftServer server = serverWorld.getServer();
         server.getPlayerManager().broadcast(
-                Text.literal("A loot container was emptied by an external source at "
+                Text.literal("A loot container was spoiled by an external source at "
                         + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "!")
                         .formatted(Formatting.RED),
                 false);
 
         FreshLootMod.LOGGER.warn(
-                "[FreshLoot] Unclaimed loot container drained by an external source at {} [{}, {}, {}] (loot table: {})",
+                "[FreshLoot] Unclaimed loot container spoiled by an external source at {} [{}, {}, {}] (loot table: {})",
                 world.getRegistryKey().getValue(),
                 pos.getX(), pos.getY(), pos.getZ(),
                 lootTableId);

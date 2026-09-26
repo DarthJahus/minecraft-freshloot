@@ -1,56 +1,44 @@
 package net.jahus.freshloot;
 
-import net.minecraft.block.entity.BarrelBlockEntity;
-import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.block.entity.ChestBlockEntity;
-import net.minecraft.block.entity.LootableContainerBlockEntity;
-import net.minecraft.entity.player.PlayerEntity;
+import net.jahus.freshloot.LootRegistry.DimPos;
+import net.minecraft.ChatFormatting;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.state.property.Properties;
-import net.minecraft.text.Text;
-import net.minecraft.util.Formatting;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.world.World;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BarrelBlock;
+import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.entity.BarrelBlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.ChestBlockEntity;
+import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-import net.jahus.freshloot.LootRegistry.DimPos;
-
-
 public final class LootContainerHandler {
 
     private LootContainerHandler() {}
 
-    /**
-     * Containers already reported as griefed by external extraction. A hopper
-     * minecart calls removeStack many times per tick, so we must alert once.
-     * Cleared when breakAndReplace re-arms the container with its loot table.
-     */
     private static final Set<DimPos> SPOILED_REPORTED = ConcurrentHashMap.newKeySet();
 
-    /**
-     * True iff be is a chest or barrel that still carries a loot table, i.e.
-     * nobody has claimed it since it was last armed. Null-safe.
-     */
     public static boolean isUnclaimedLootContainer(BlockEntity be) {
         if (!(be instanceof ChestBlockEntity || be instanceof BarrelBlockEntity)) {
             return false;
         }
-        return be instanceof LootableContainerBlockEntity lootable && lootable.getLootTable() != null;
+        return be instanceof RandomizableContainerBlockEntity lootable && lootable.getLootTable() != null;
     }
 
-    /**
-     * An unclaimed loot container was drained by something outside our
-     * open/close flow (hopper, hopper minecart, dropper...). Same treatment as
-     * a player breaking it: public warning, log, neutralize.
-     */
-    public static void reportSpoiledByExtraction(LootableContainerBlockEntity container, World world, BlockPos pos) {
-        if (world.isClient() || !(world instanceof net.minecraft.server.world.ServerWorld serverWorld)) {
+    public static void reportSpoiledByExtraction(RandomizableContainerBlockEntity container, Level world, BlockPos pos) {
+        if (world.isClientSide() || !(world instanceof ServerLevel serverWorld)) {
             return;
         }
         DimPos key = DimPos.of(world, pos);
@@ -59,39 +47,39 @@ public final class LootContainerHandler {
         }
 
         String lootTableId = container.getLootTable() != null
-                ? container.getLootTable().getValue().toString()
+                ? container.getLootTable().identifier().toString()
                 : "unknown";
 
         MinecraftServer server = serverWorld.getServer();
-        server.getPlayerManager().broadcast(
-                Text.literal("A loot container was spoiled by an external source at "
+        server.getPlayerList().broadcastSystemMessage(
+                Component.literal("A loot container was spoiled by an external source at "
                         + pos.getX() + " " + pos.getY() + " " + pos.getZ() + "!")
-                        .formatted(Formatting.RED),
+                        .withStyle(ChatFormatting.RED),
                 false);
 
         FreshLootMod.LOGGER.warn(
                 "[FreshLoot] Unclaimed loot container spoiled by an external source at {} [{}, {}, {}] (loot table: {})",
-                world.getRegistryKey().getValue(),
+                world.dimension().identifier(),
                 pos.getX(), pos.getY(), pos.getZ(),
                 lootTableId);
 
         neutralizeLootOnBreak(container);
     }
 
-    public static boolean tryOpen(LootableContainerBlockEntity container, PlayerEntity player) {
-        World world = player.getWorld();
-        if (world.isClient()) {
+    public static boolean tryOpen(RandomizableContainerBlockEntity container, Player player) {
+        Level world = player.level();
+        if (world.isClientSide()) {
             return true;
         }
         if (player.isSpectator()) {
             return true;
         }
-        DimPos pos = DimPos.of(world, container.getPos());
+        DimPos pos = DimPos.of(world, container.getBlockPos());
 
         if (LootRegistry.isOpen(pos)) {
             UUID viewer = LootRegistry.getViewer(pos);
-            if (player instanceof ServerPlayerEntity spe && !spe.getUuid().equals(viewer)) {
-                spe.sendMessage(Text.literal("Someone else is already looting this."), true);
+            if (player instanceof ServerPlayer spe && !spe.getUUID().equals(viewer)) {
+                spe.sendSystemMessage(Component.literal("Someone else is already looting this."));
             }
             return false;
         }
@@ -100,20 +88,20 @@ public final class LootContainerHandler {
             return true;
         }
 
-        MinecraftServer server = Objects.requireNonNull(player.getServer());
+        MinecraftServer server = Objects.requireNonNull(player.level().getServer());
 
-        if (player instanceof ServerPlayerEntity spe && LootRegistry.hasLooted(server, spe.getUuid(), pos)) {
-            spe.sendMessage(Text.literal("You have already looted this chest."), true);
+        if (player instanceof ServerPlayer spe && LootRegistry.hasLooted(server, spe.getUUID(), pos)) {
+            spe.sendSystemMessage(Component.literal("You have already looted this chest."));
             return false;
         }
 
-        LootRegistry.markOpen(pos, player.getUuid());
+        LootRegistry.markOpen(pos, player.getUUID());
         return true;
     }
 
-    public static void applyLoot(LootableContainerBlockEntity container, PlayerEntity player) {
-        World world = player.getWorld();
-        if (world.isClient()) {
+    public static void applyLoot(RandomizableContainerBlockEntity container, Player player) {
+        Level world = player.level();
+        if (world.isClientSide()) {
             return;
         }
         if (player.isSpectator()) {
@@ -124,30 +112,30 @@ public final class LootContainerHandler {
             return;
         }
 
-        DimPos pos = DimPos.of(world, container.getPos());
+        DimPos pos = DimPos.of(world, container.getBlockPos());
 
         Direction facing = readFacing(world, pos.pos());
         LootRegistry.capturePendingRoll(pos, lootTable, facing);
 
-        container.generateLoot(player);
+        container.unpackLootTable(player);
     }
 
-    public static void onClose(LootableContainerBlockEntity container, PlayerEntity player, MinecraftServer server) {
-        World world = player.getWorld();
-        if (world.isClient()) {
+    public static void onClose(RandomizableContainerBlockEntity container, Player player, MinecraftServer server) {
+        Level world = player.level();
+        if (world.isClientSide()) {
             return;
         }
         if (player.isSpectator()) {
             return;
         }
-        DimPos dimPos = DimPos.of(world, container.getPos());
+        DimPos dimPos = DimPos.of(world, container.getBlockPos());
 
         UUID viewer = LootRegistry.getViewer(dimPos);
-        if (viewer == null || !viewer.equals(player.getUuid())) {
+        if (viewer == null || !viewer.equals(player.getUUID())) {
             return;
         }
 
-        LootRegistry.markLooted(server, player.getUuid(), dimPos);
+        LootRegistry.markLooted(server, player.getUUID(), dimPos);
         LootRegistry.markClosed(dimPos);
 
         LootRegistry.LootRecord record = LootRegistry.takePendingRoll(dimPos);
@@ -158,39 +146,39 @@ public final class LootContainerHandler {
         server.execute(() -> breakAndReplace(dimPos, record, server));
     }
 
-    private static Direction readFacing(World world, BlockPos pos) {
-        var state = world.getBlockState(pos);
-        return state.contains(Properties.HORIZONTAL_FACING)
-                ? state.get(Properties.HORIZONTAL_FACING)
+    private static Direction readFacing(Level world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return state.hasProperty(BlockStateProperties.HORIZONTAL_FACING)
+                ? state.getValue(BlockStateProperties.HORIZONTAL_FACING)
                 : Direction.NORTH;
     }
 
     private static void breakAndReplace(DimPos dimPos, LootRegistry.LootRecord record, MinecraftServer server) {
-        if (!(server.getWorld(dimPos.dimension()) instanceof net.minecraft.server.world.ServerWorld world)) {
+        if (!(server.getLevel(dimPos.dimension()) instanceof ServerLevel world)) {
             return;
         }
         BlockPos pos = dimPos.pos();
-        var blockState = world.getBlockState(pos);
-        if (!(world.getBlockEntity(pos) instanceof LootableContainerBlockEntity)) {
+        BlockState blockState = world.getBlockState(pos);
+        if (!(world.getBlockEntity(pos) instanceof RandomizableContainerBlockEntity)) {
             return;
         }
 
         var block = blockState.getBlock();
 
-        world.breakBlock(pos, true, null, 512);
+        world.destroyBlock(pos, true, null);
 
-        net.minecraft.block.BlockState newState;
-        if (block instanceof net.minecraft.block.ChestBlock) {
-            newState = block.getDefaultState().with(net.minecraft.block.ChestBlock.FACING, record.facing());
-        } else if (block instanceof net.minecraft.block.BarrelBlock) {
-            newState = block.getDefaultState().with(net.minecraft.block.BarrelBlock.FACING, record.facing());
+        BlockState newState;
+        if (block instanceof ChestBlock) {
+            newState = block.defaultBlockState().setValue(ChestBlock.FACING, record.facing());
+        } else if (block instanceof BarrelBlock) {
+            newState = block.defaultBlockState().setValue(BarrelBlock.FACING, record.facing());
         } else {
-            newState = block.getDefaultState();
+            newState = block.defaultBlockState();
         }
-        world.setBlockState(pos, newState);
+        world.setBlock(pos, newState, 3);
 
-        if (world.getBlockEntity(pos) instanceof LootableContainerBlockEntity newContainer) {
-            newContainer.setLootTable(record.lootTable(), 0L);
+        if (world.getBlockEntity(pos) instanceof RandomizableContainerBlockEntity newContainer) {
+            newContainer.setLootTable(record.lootTable());
             SPOILED_REPORTED.remove(dimPos);
         }
     }
@@ -200,17 +188,17 @@ public final class LootContainerHandler {
         if (viewer == null) {
             return;
         }
-        ServerPlayerEntity spe = server.getPlayerManager().getPlayer(viewer);
+        ServerPlayer spe = server.getPlayerList().getPlayer(viewer);
         if (spe != null) {
-            spe.closeHandledScreen();
+            spe.closeContainer();
         } else {
             LootRegistry.markClosed(pos);
         }
     }
 
-    public static void neutralizeLootOnBreak(LootableContainerBlockEntity container) {
+    public static void neutralizeLootOnBreak(RandomizableContainerBlockEntity container) {
         if (container.getLootTable() != null) {
-            container.setLootTable(null, 0L);
+            container.setLootTable(null);
         }
     }
 }

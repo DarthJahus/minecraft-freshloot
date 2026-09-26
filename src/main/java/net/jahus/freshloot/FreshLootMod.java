@@ -3,24 +3,24 @@ package net.jahus.freshloot;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.ChestBlock;
-import net.minecraft.block.entity.BarrelBlockEntity;
-import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.block.entity.ChestBlockEntity;
-import net.minecraft.block.entity.LootableContainerBlockEntity;
-import net.minecraft.block.enums.ChestType;
+import net.jahus.freshloot.LootRegistry.DimPos;
+import net.minecraft.ChatFormatting;
+import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.text.Text;
-import net.minecraft.util.ActionResult;
-import net.minecraft.util.Formatting;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.entity.BarrelBlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.ChestBlockEntity;
+import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.ChestType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.UUID;
-
-import net.jahus.freshloot.LootRegistry.DimPos;
 
 public class FreshLootMod implements ModInitializer {
     public static final String MOD_ID = "freshloot";
@@ -29,50 +29,44 @@ public class FreshLootMod implements ModInitializer {
     @Override
     public void onInitialize() {
         UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
-            if (world.isClient()) {
-                return ActionResult.PASS;
+            if (world.isClientSide()) {
+                return InteractionResult.PASS;
             }
-            // Vanilla only opens a container when the player is NOT sneaking with
-            // something in hand. Sneak + item means "place / use the item against
-            // this block": the container must not be opened, so the loot table
-            // must not be consumed here (the placement guards need it intact).
-            // Sneaking with empty hands still opens the container normally.
-            if (player.isSneaking()
-                    && (!player.getMainHandStack().isEmpty() || !player.getOffHandStack().isEmpty())) {
-                return ActionResult.PASS;
+            if (player.isShiftKeyDown()
+                    && (!player.getMainHandItem().isEmpty() || !player.getOffhandItem().isEmpty())) {
+                return InteractionResult.PASS;
             }
 
-            var blockPos = hitResult.getBlockPos();
+            BlockPos blockPos = hitResult.getBlockPos();
             BlockEntity be = world.getBlockEntity(blockPos);
-            if (!(be instanceof LootableContainerBlockEntity container)
+            if (!(be instanceof RandomizableContainerBlockEntity container)
                     || !(be instanceof ChestBlockEntity || be instanceof BarrelBlockEntity)) {
-                return ActionResult.PASS;
+                return InteractionResult.PASS;
             }
 
             BlockState state = world.getBlockState(blockPos);
 
-            // v1.0.x limitation: double chests are left untouched. Only single chests are managed.
-            if (be instanceof ChestBlockEntity && state.contains(ChestBlock.CHEST_TYPE)
-                    && state.get(ChestBlock.CHEST_TYPE) != ChestType.SINGLE) {
-                return ActionResult.PASS;
+            if (be instanceof ChestBlockEntity && state.hasProperty(ChestBlock.TYPE)
+                    && state.getValue(ChestBlock.TYPE) != ChestType.SINGLE) {
+                return InteractionResult.PASS;
             }
 
             if (!LootContainerHandler.tryOpen(container, player)) {
-                return ActionResult.FAIL;
+                return InteractionResult.FAIL;
             }
             LootContainerHandler.applyLoot(container, player);
 
-            return ActionResult.PASS;
+            return InteractionResult.PASS;
         });
 
         PlayerBlockBreakEvents.BEFORE.register((world, player, pos, state, blockEntity) -> {
-            if (world.isClient()) {
+            if (world.isClientSide()) {
                 return true;
             }
-            if (!(blockEntity instanceof LootableContainerBlockEntity container)) {
+            if (!(blockEntity instanceof RandomizableContainerBlockEntity container)) {
                 return true;
             }
-            if (!(player instanceof ServerPlayerEntity spe)) {
+            if (!(player instanceof ServerPlayer spe)) {
                 return true;
             }
             if (player.isSpectator()) {
@@ -80,25 +74,25 @@ public class FreshLootMod implements ModInitializer {
             }
 
             DimPos dimPos = DimPos.of(world, pos);
-            MinecraftServer server = spe.getServer();
+            MinecraftServer server = spe.level().getServer();
 
             boolean neverLooted = container.getLootTable() != null;
             UUID viewerUuid = LootRegistry.getViewer(dimPos);
             boolean isCurrentlyOpen = viewerUuid != null;
-            boolean openByOther = isCurrentlyOpen && !viewerUuid.equals(spe.getUuid());
+            boolean openByOther = isCurrentlyOpen && !viewerUuid.equals(spe.getUUID());
 
             if (neverLooted || isCurrentlyOpen) {
-                Text publicWarning = Text.literal(spe.getName().getString() + " broke a loot container!")
-                        .formatted(Formatting.RED);
-                server.getPlayerManager().broadcast(publicWarning, false);
+                Component publicWarning = Component.literal(spe.getName().getString() + " broke a loot container!")
+                        .withStyle(ChatFormatting.RED);
+                server.getPlayerList().broadcastSystemMessage(publicWarning, false);
 
                 String lootTableId = container.getLootTable() != null
-                        ? container.getLootTable().getValue().toString()
+                        ? container.getLootTable().identifier().toString()
                         : "unknown";
                 LOGGER.warn(
                         "[FreshLoot] {} broke an unlooted loot container at {} [{}, {}, {}] (loot table: {})",
                         spe.getName().getString(),
-                        dimPos.dimension().getValue(),
+                        dimPos.dimension().identifier(),
                         pos.getX(), pos.getY(), pos.getZ(),
                         lootTableId
                 );

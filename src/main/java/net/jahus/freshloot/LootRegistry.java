@@ -1,43 +1,52 @@
 package net.jahus.freshloot;
 
-import net.minecraft.nbt.NbtCompound;
-import net.minecraft.nbt.NbtElement;
-import net.minecraft.nbt.NbtList;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.RegistryKeys;
-import net.minecraft.registry.RegistryWrapper;
-import net.minecraft.loot.LootTable;
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.world.PersistentState;
-import net.minecraft.world.PersistentStateManager;
-import net.minecraft.world.World;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.saveddata.SavedData;
+import net.minecraft.world.level.saveddata.SavedDataType;
+import net.minecraft.world.level.storage.loot.LootTable;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class LootRegistry extends PersistentState {
+/**
+ * Persistent "who looted which position" + ephemeral open/pending maps.
+ * Uses SavedDataType + Codec (26.x API).
+ */
+public class LootRegistry extends SavedData {
 
-    private static final String MOD_ID = "freshloot";
-
-    public record DimPos(RegistryKey<World> dimension, BlockPos pos) {
-        public static DimPos of(World world, BlockPos pos) {
-            return new DimPos(world.getRegistryKey(), pos.toImmutable());
+    public record DimPos(ResourceKey<Level> dimension, BlockPos pos) {
+        public static DimPos of(Level world, BlockPos pos) {
+            return new DimPos(world.dimension(), pos.immutable());
         }
+
+        public static final Codec<DimPos> CODEC = RecordCodecBuilder.create(i -> i.group(
+                ResourceKey.codec(Registries.DIMENSION).fieldOf("dim").forGetter(DimPos::dimension),
+                BlockPos.CODEC.fieldOf("pos").forGetter(DimPos::pos)
+        ).apply(i, DimPos::new));
     }
 
     private static final Map<DimPos, UUID> OPENED_BY = new ConcurrentHashMap<>();
 
-    public record LootRecord(RegistryKey<LootTable> lootTable, Direction facing) {}
+    public record LootRecord(ResourceKey<LootTable> lootTable, Direction facing) {}
 
     private static final Map<DimPos, LootRecord> PENDING_ROLL = new ConcurrentHashMap<>();
 
-    public static void capturePendingRoll(DimPos pos, RegistryKey<LootTable> lootTable, Direction facing) {
+    public static void capturePendingRoll(DimPos pos, ResourceKey<LootTable> lootTable, Direction facing) {
         PENDING_ROLL.put(pos, new LootRecord(lootTable, facing));
     }
 
@@ -63,6 +72,38 @@ public class LootRegistry extends PersistentState {
 
     private final Map<UUID, Set<DimPos>> lootedByPlayer = new ConcurrentHashMap<>();
 
+    public LootRegistry() {}
+
+    private LootRegistry(Map<UUID, List<DimPos>> loaded) {
+        loaded.forEach((uuid, list) -> {
+            Set<DimPos> set = ConcurrentHashMap.newKeySet();
+            set.addAll(list);
+            lootedByPlayer.put(uuid, set);
+        });
+    }
+
+    private static final Codec<Map<UUID, List<DimPos>>> LOOTED_CODEC =
+            Codec.unboundedMap(
+                    Codec.STRING.xmap(UUID::fromString, UUID::toString),
+                    DimPos.CODEC.listOf()
+            );
+
+    public static final Codec<LootRegistry> CODEC = LOOTED_CODEC.xmap(
+            LootRegistry::new,
+            reg -> {
+                Map<UUID, List<DimPos>> out = new HashMap<>();
+                reg.lootedByPlayer.forEach((uuid, set) -> out.put(uuid, new ArrayList<>(set)));
+                return out;
+            }
+    );
+
+    public static final SavedDataType<LootRegistry> TYPE = new SavedDataType<>(
+            Identifier.fromNamespaceAndPath("freshloot", "looted"),
+            LootRegistry::new,
+            CODEC,
+            null
+    );
+
     public static boolean hasLooted(MinecraftServer server, UUID player, DimPos pos) {
         Set<DimPos> looted = getState(server).lootedByPlayer.get(player);
         return looted != null && looted.contains(pos);
@@ -71,52 +112,11 @@ public class LootRegistry extends PersistentState {
     public static void markLooted(MinecraftServer server, UUID player, DimPos pos) {
         LootRegistry state = getState(server);
         state.lootedByPlayer.computeIfAbsent(player, k -> ConcurrentHashMap.newKeySet()).add(pos);
-        state.markDirty();
+        state.setDirty();
     }
 
     private static LootRegistry getState(MinecraftServer server) {
-        PersistentStateManager manager = Objects.requireNonNull(server.getWorld(World.OVERWORLD)).getPersistentStateManager();
-        return manager.getOrCreate(TYPE, MOD_ID);
+        ServerLevel overworld = Objects.requireNonNull(server.getLevel(Level.OVERWORLD));
+        return overworld.getDataStorage().computeIfAbsent(TYPE);
     }
-
-    @Override
-    public NbtCompound writeNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup registries) {
-        NbtCompound playersNbt = new NbtCompound();
-        lootedByPlayer.forEach((uuid, positions) -> {
-            NbtList posList = new NbtList();
-            for (DimPos dp : positions) {
-                NbtCompound entry = new NbtCompound();
-                entry.putString("dim", dp.dimension().getValue().toString());
-                entry.putLong("pos", dp.pos().asLong());
-                posList.add(entry);
-            }
-            playersNbt.put(uuid.toString(), posList);
-        });
-        nbt.put("lootedByPlayer", playersNbt);
-        return nbt;
-    }
-
-    public static LootRegistry createFromNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup registries) {
-        LootRegistry state = new LootRegistry();
-        NbtCompound playersNbt = nbt.getCompound("lootedByPlayer");
-        for (String key : playersNbt.getKeys()) {
-            UUID uuid = UUID.fromString(key);
-            NbtList posList = playersNbt.getList(key, NbtElement.COMPOUND_TYPE);
-            Set<DimPos> positions = ConcurrentHashMap.newKeySet();
-            for (int i = 0; i < posList.size(); i++) {
-                NbtCompound entry = posList.getCompound(i);
-                RegistryKey<World> dim = RegistryKey.of(RegistryKeys.WORLD, Identifier.of(entry.getString("dim")));
-                BlockPos pos = BlockPos.fromLong(entry.getLong("pos"));
-                positions.add(new DimPos(dim, pos));
-            }
-            state.lootedByPlayer.put(uuid, positions);
-        }
-        return state;
-    }
-
-    private static final Type<LootRegistry> TYPE = new Type<>(
-            LootRegistry::new,
-            LootRegistry::createFromNbt,
-            null
-    );
 }

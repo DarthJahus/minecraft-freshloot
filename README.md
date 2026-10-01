@@ -1,6 +1,8 @@
 # FreshLoot
-
 A chest or barrel with a loot table gives out an **independent loot roll to each player**, once per player and per position.
+
+[![Modrinth](https://img.shields.io/modrinth/dt/jahus-freshloot?logo=modrinth&label=Modrinth)](https://modrinth.com/mod/jahus-freshloot)
+[![CurseForge](https://img.shields.io/curseforge/dt/1720146?logo=curseforge&label=CurseForge)](https://www.curseforge.com/projects/1720146)
 
 ## The problem this solves
 

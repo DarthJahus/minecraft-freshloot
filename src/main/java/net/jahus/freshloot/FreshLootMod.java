@@ -6,6 +6,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.entity.BarrelBlockEntity;
@@ -14,80 +15,79 @@ import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.ChestType;
-import net.minecraftforge.event.entity.player.PlayerInteractEvent;
-import net.minecraftforge.event.level.BlockEvent;
-import net.minecraftforge.eventbus.api.listener.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+import net.neoforged.neoforge.event.level.block.BreakBlockEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.UUID;
 
-/**
- * Forge EventBus 7: cancellable listeners return {@code boolean} ({@code true} = cancel).
- * No {@code setCanceled} / {@code setCancellationResult}.
- */
 @Mod(FreshLootMod.MOD_ID)
-@Mod.EventBusSubscriber(modid = FreshLootMod.MOD_ID)
 public final class FreshLootMod {
 
     public static final String MOD_ID = "freshloot";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     public FreshLootMod() {
-        LOGGER.info("FreshLoot (Forge) loaded!");
+        NeoForge.EVENT_BUS.register(this);
+        LOGGER.info("FreshLoot (NeoForge) loaded!");
     }
 
     @SubscribeEvent
-    public static boolean onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+    public void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
         Level world = event.getLevel();
         if (world.isClientSide()) {
-            return false;
+            return;
         }
         var player = event.getEntity();
         if (player.isShiftKeyDown()
                 && (!player.getMainHandItem().isEmpty() || !player.getOffhandItem().isEmpty())) {
-            return false;
+            return;
         }
 
         BlockPos blockPos = event.getPos();
         BlockEntity be = world.getBlockEntity(blockPos);
         if (!(be instanceof RandomizableContainerBlockEntity container)
                 || !(be instanceof ChestBlockEntity || be instanceof BarrelBlockEntity)) {
-            return false;
+            return;
         }
 
         BlockState state = world.getBlockState(blockPos);
         if (be instanceof ChestBlockEntity && state.hasProperty(ChestBlock.TYPE)
                 && state.getValue(ChestBlock.TYPE) != ChestType.SINGLE) {
-            return false;
+            return;
         }
 
         if (!LootContainerHandler.tryOpen(container, player)) {
-            return true;  // cancel open
+            event.setCanceled(true);
+            event.setCancellationResult(InteractionResult.FAIL);
+            return;
         }
         LootContainerHandler.applyLoot(container, player);
-        return false;
     }
 
     @SubscribeEvent
-    public static void onBlockBreak(BlockEvent.BreakEvent event) {
-        Level world = event.getPlayer().level();
-        if (world.isClientSide()) {
-            return;
-        }
-        BlockEntity blockEntity = world.getBlockEntity(event.getPos());
-        if (!(blockEntity instanceof RandomizableContainerBlockEntity container)) {
-            return;
-        }
+    public void onBlockBreak(BreakBlockEvent event) {
         if (!(event.getPlayer() instanceof ServerPlayer spe)) {
             return;
         }
         if (spe.isSpectator()) {
             return;
         }
+        Level world = spe.level();
+        if (world.isClientSide()) {
+            return;
+        }
 
         BlockPos pos = event.getPos();
+        BlockEntity blockEntity = world.getBlockEntity(pos);
+        if (!(blockEntity instanceof RandomizableContainerBlockEntity container)) {
+            return;
+        }
+
         DimPos dimPos = DimPos.of(world, pos);
         MinecraftServer server = spe.level().getServer();
 
